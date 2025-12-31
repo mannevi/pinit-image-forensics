@@ -3,8 +3,6 @@ import os
 from datetime import datetime
 from PIL import Image
 import piexif
-import cv2
-import numpy as np
 
 
 def sha256_file(path):
@@ -52,10 +50,13 @@ def extract_exif(path):
 
 
 def tamper_analysis(path):
-    img = cv2.imread(path, cv2.IMREAD_GRAYSCALE)
-    lap = cv2.Laplacian(img, cv2.CV_64F)
-    variance = lap.var()
-    probability = min(100, max(5, int(variance / 6)))
+    img = Image.open(path).convert("L")
+    pixels = list(img.getdata())
+
+    mean = sum(pixels) / len(pixels)
+    variance = sum((p - mean) ** 2 for p in pixels) / len(pixels)
+
+    probability = max(5, min(95, int(100 - (variance / 500))))
     return round(variance, 2), probability
 
 
@@ -72,6 +73,7 @@ def analyze_image(path, original_filename, secure_capture_flag, claimed_location
         metadata_score -= 30
 
     ai_score = max(0, 100 - tamper_prob)
+
     overall = int(
         metadata_score * 0.35 +
         (100 - tamper_prob) * 0.4 +
