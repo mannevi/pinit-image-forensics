@@ -31,7 +31,6 @@ if uploaded:
         )
 
         pdf_path = os.path.join("reports", f"{report_id}.pdf")
-
         build_pdf_report(analysis, pdf_path, report_id)
 
         with open(pdf_path, "rb") as f:
