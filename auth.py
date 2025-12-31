@@ -2,18 +2,22 @@ import sqlite3
 import hashlib
 import os
 
-# ---------------------------
-# FIXED DATABASE PATH
-# ---------------------------
+# -----------------------------
+# SINGLE SOURCE OF TRUTH PATH
+# -----------------------------
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DB_PATH = os.path.join(BASE_DIR, "users.db")
 
 
-# ---------------------------
-# Initialize DB (ALWAYS)
-# ---------------------------
+def get_connection():
+    return sqlite3.connect(DB_PATH, check_same_thread=False)
+
+
+# -----------------------------
+# INIT DB (SAFE TO CALL ALWAYS)
+# -----------------------------
 def init_db():
-    conn = sqlite3.connect(DB_PATH, check_same_thread=False)
+    conn = get_connection()
     c = conn.cursor()
 
     c.execute("""
@@ -28,18 +32,12 @@ def init_db():
     conn.close()
 
 
-# ---------------------------
-# Password hashing
-# ---------------------------
-def hash_password(password: str) -> str:
+def hash_password(password):
     return hashlib.sha256(password.encode()).hexdigest()
 
 
-# ---------------------------
-# Register user
-# ---------------------------
-def register_user(username: str, password: str) -> bool:
-    conn = sqlite3.connect(DB_PATH, check_same_thread=False)
+def register_user(username, password):
+    conn = get_connection()
     c = conn.cursor()
 
     try:
@@ -57,11 +55,8 @@ def register_user(username: str, password: str) -> bool:
         conn.close()
 
 
-# ---------------------------
-# Verify login
-# ---------------------------
-def verify_login(username: str, password: str) -> bool:
-    conn = sqlite3.connect(DB_PATH, check_same_thread=False)
+def verify_login(username, password):
+    conn = get_connection()
     c = conn.cursor()
 
     c.execute(
@@ -69,8 +64,7 @@ def verify_login(username: str, password: str) -> bool:
         (username, hash_password(password))
     )
 
-    result = c.fetchone()
+    row = c.fetchone()
     conn.close()
 
-    return result is not None
-
+    return row is not None
