@@ -2,11 +2,15 @@ import sqlite3
 import hashlib
 import os
 
-DB_PATH = "users.db"
+# ---------------------------
+# FIXED DATABASE PATH
+# ---------------------------
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+DB_PATH = os.path.join(BASE_DIR, "users.db")
 
 
 # ---------------------------
-# Database initialization
+# Initialize DB (ALWAYS)
 # ---------------------------
 def init_db():
     conn = sqlite3.connect(DB_PATH, check_same_thread=False)
@@ -35,22 +39,22 @@ def hash_password(password: str) -> str:
 # Register user
 # ---------------------------
 def register_user(username: str, password: str) -> bool:
-    try:
-        conn = sqlite3.connect(DB_PATH, check_same_thread=False)
-        c = conn.cursor()
+    conn = sqlite3.connect(DB_PATH, check_same_thread=False)
+    c = conn.cursor()
 
+    try:
         c.execute(
             "INSERT INTO users (username, password) VALUES (?, ?)",
             (username, hash_password(password))
         )
-
         conn.commit()
-        conn.close()
         return True
 
     except sqlite3.IntegrityError:
-        # Username already exists
         return False
+
+    finally:
+        conn.close()
 
 
 # ---------------------------
@@ -61,11 +65,12 @@ def verify_login(username: str, password: str) -> bool:
     c = conn.cursor()
 
     c.execute(
-        "SELECT * FROM users WHERE username=? AND password=?",
+        "SELECT id FROM users WHERE username=? AND password=?",
         (username, hash_password(password))
     )
 
-    user = c.fetchone()
+    result = c.fetchone()
     conn.close()
 
-    return user is not None
+    return result is not None
+
