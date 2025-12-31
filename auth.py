@@ -2,20 +2,19 @@ import sqlite3
 import hashlib
 import os
 
-# -----------------------------
-# SINGLE SOURCE OF TRUTH PATH
-# -----------------------------
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-DB_PATH = os.path.join(BASE_DIR, "users.db")
+# -------------------------------------------------
+# STREAMLIT CLOUD SAFE SQLITE LOCATION
+# -------------------------------------------------
+DB_PATH = "/tmp/pinit_users.db"
 
 
 def get_connection():
     return sqlite3.connect(DB_PATH, check_same_thread=False)
 
 
-# -----------------------------
-# INIT DB (SAFE TO CALL ALWAYS)
-# -----------------------------
+# -------------------------------------------------
+# INIT DB (SAFE TO CALL MULTIPLE TIMES)
+# -------------------------------------------------
 def init_db():
     conn = get_connection()
     c = conn.cursor()
@@ -37,6 +36,8 @@ def hash_password(password):
 
 
 def register_user(username, password):
+    init_db()  # 🔥 FORCE TABLE EXISTENCE EVERY TIME
+
     conn = get_connection()
     c = conn.cursor()
 
@@ -56,6 +57,8 @@ def register_user(username, password):
 
 
 def verify_login(username, password):
+    init_db()  # 🔥 ENSURE TABLE EXISTS
+
     conn = get_connection()
     c = conn.cursor()
 
@@ -64,7 +67,7 @@ def verify_login(username, password):
         (username, hash_password(password))
     )
 
-    row = c.fetchone()
+    result = c.fetchone()
     conn.close()
 
-    return row is not None
+    return result is not None
