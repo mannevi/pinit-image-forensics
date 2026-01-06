@@ -1,129 +1,57 @@
-import streamlit as st
-import uuid
+from flask import Flask, render_template, request, send_file
 import os
+import uuid
 
-from auth import init_db, register_user, verify_login
 from real_analysis import analyze_image
-from report_generator import build_pdf_report
+from report_generator import generate_pdf_report
+
+app = Flask(__name__)
+
+UPLOAD_FOLDER = "uploads"
+REPORT_FOLDER = "reports"
+
+os.makedirs(UPLOAD_FOLDER, exist_ok=True)
+os.makedirs(REPORT_FOLDER, exist_ok=True)
 
 
-# ---------------------------
-# INITIAL SETUP
-# ---------------------------
-st.set_page_config(page_title="PinIT Forensics", layout="centered")
-init_db()
+@app.route("/", methods=["GET", "POST"])
+def index():
+    if request.method == "POST":
+        file = request.files.get("image")
 
-if "logged_in" not in st.session_state:
-    st.session_state.logged_in = False
-    st.session_state.username = None
+        if not file:
+            return "No file uploaded", 400
 
+        filename = f"{uuid.uuid4()}_{file.filename}"
+        image_path = os.path.join(UPLOAD_FOLDER, filename)
+        file.save(image_path)
 
-# ---------------------------
-# AUTH PAGES
-# ---------------------------
-def login_page():
-    st.title("🔐 PinIT Login")
+        analysis = analyze_image(image_path)
 
-    username = st.text_input("Username")
-    password = st.text_input("Password", type="password")
+        score = analysis["authenticity_score"]
 
-    if st.button("Login"):
-        if verify_login(username, password):
-            st.session_state.logged_in = True
-            st.session_state.username = username
-            st.success("Login successful")
-            st.rerun()
+        if score >= 75:
+            risk_label = "Low Fraud Risk"
+        elif score >= 45:
+            risk_label = "Medium Fraud Risk"
         else:
-            st.error("Invalid username or password")
+            risk_label = "High Fraud Risk"
 
-    st.markdown("---")
-    if st.button("Create New Account"):
-        st.session_state.page = "register"
-        st.rerun()
+        analysis["risk_label"] = risk_label
 
+        report_id = f"PINIT-{uuid.uuid4()}"
+        pdf_path = os.path.join(REPORT_FOLDER, f"{report_id}.pdf")
 
-def register_page():
-    st.title("📝 Create PinIT Account")
+        generate_pdf_report(
+            analysis=analysis,
+            report_id=report_id,
+            output_path=pdf_path
+        )
 
-    username = st.text_input("Choose Username")
-    password = st.text_input("Choose Password", type="password")
-    confirm = st.text_input("Confirm Password", type="password")
+        return send_file(pdf_path, as_attachment=True)
 
-    if st.button("Register"):
-        if password != confirm:
-            st.error("Passwords do not match")
-        elif register_user(username, password):
-            st.success("Account created. Please login.")
-            st.session_state.page = "login"
-            st.rerun()
-        else:
-            st.error("Username already exists")
-
-    if st.button("Back to Login"):
-        st.session_state.page = "login"
-        st.rerun()
+    return render_template("index.html")
 
 
-# ---------------------------
-# MAIN APP (AFTER LOGIN)
-# ---------------------------
-def main_app():
-    st.title("📸 PinIT Image Forensics Platform")
-    st.write(f"Welcome, **{st.session_state.username}**")
-
-    if st.button("Logout"):
-        st.session_state.logged_in = False
-        st.session_state.username = None
-        st.session_state.page = "login"
-        st.rerun()
-
-    st.markdown("---")
-
-    uploaded = st.file_uploader("Upload Image", type=["jpg", "jpeg", "png"])
-    secure_capture = st.checkbox("Captured using PinIT Secure Capture")
-    claimed_location = st.text_input("Claimed Capture Location (optional)")
-
-    if uploaded:
-        os.makedirs("uploads", exist_ok=True)
-        os.makedirs("reports", exist_ok=True)
-
-        path = os.path.join("uploads", uploaded.name)
-        with open(path, "wb") as f:
-            f.write(uploaded.read())
-
-        st.image(path, width="stretch")
-
-        if st.button("Generate Report"):
-            report_id = f"PINIT-{uuid.uuid4()}"
-
-            analysis = analyze_image(
-                path,
-                uploaded.name,
-                secure_capture,
-                claimed_location
-            )
-
-            pdf_path = f"reports/{report_id}.pdf"
-            build_pdf_report(analysis, pdf_path, report_id)
-
-            with open(pdf_path, "rb") as f:
-                st.download_button(
-                    "Download Forensic Report",
-                    f,
-                    file_name=f"{report_id}.pdf"
-                )
-
-
-# ---------------------------
-# ROUTING LOGIC
-# ---------------------------
-if "page" not in st.session_state:
-    st.session_state.page = "login"
-
-if not st.session_state.logged_in:
-    if st.session_state.page == "register":
-        register_page()
-    else:
-        login_page()
-else:
-    main_app()
+if __name__ == "__main__":
+    app.run(debug=True)
