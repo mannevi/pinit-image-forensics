@@ -1,121 +1,118 @@
-import hashlib
+from PIL import Image, ExifTags
+import numpy as np
 import os
-from datetime import datetime
-from PIL import Image
-import piexif
 
 
-def sha256_file(path):
-    h = hashlib.sha256()
-    with open(path, "rb") as f:
-        for chunk in iter(lambda: f.read(8192), b""):
-            h.update(chunk)
-    return h.hexdigest()
+# ---------------------------
+# ELA CALCULATION
+# ---------------------------
+def calculate_ela(image_path):
+    original = Image.open(image_path).convert("RGB")
+    temp_path = "temp_ela.jpg"
+
+    original.save(temp_path, "JPEG", quality=90)
+    compressed = Image.open(temp_path)
+
+    ela = np.mean(np.abs(np.asarray(original, dtype=np.int16)
+                         - np.asarray(compressed, dtype=np.int16)))
+
+    os.remove(temp_path)
+    return float(ela)
 
 
-def extract_exif(path):
+# ---------------------------
+# METADATA EXTRACTION
+# ---------------------------
+def extract_exif(image_path):
+    exif_data = {
+        "datetime": None,
+        "gps": None,
+        "software": None
+    }
+
     try:
-        exif = piexif.load(path)
-        gps = exif.get("GPS", {})
+        img = Image.open(image_path)
+        exif_raw = img._getexif()
+        if not exif_raw:
+            return exif_data
 
-        def dms_to_deg(dms, ref):
-            d = dms[0][0] / dms[0][1]
-            m = dms[1][0] / dms[1][1]
-            s = dms[2][0] / dms[2][1]
-            val = d + m / 60 + s / 3600
-            return -val if ref in [b'S', b'W'] else val
+        for tag, value in exif_raw.items():
+            tag_name = ExifTags.TAGS.get(tag, tag)
 
-        lat = lon = None
-        if piexif.GPSIFD.GPSLatitude in gps:
-            lat = dms_to_deg(
-                gps[piexif.GPSIFD.GPSLatitude],
-                gps.get(piexif.GPSIFD.GPSLatitudeRef, b'N')
-            )
-            lon = dms_to_deg(
-                gps[piexif.GPSIFD.GPSLongitude],
-                gps.get(piexif.GPSIFD.GPSLongitudeRef, b'E')
-            )
+            if tag_name == "DateTimeOriginal":
+                exif_data["datetime"] = value
+            elif tag_name == "Software":
+                exif_data["software"] = value
+            elif tag_name == "GPSInfo":
+                exif_data["gps"] = value
 
-        return {
-            "make": exif["0th"].get(piexif.ImageIFD.Make, b"").decode(errors="ignore"),
-            "model": exif["0th"].get(piexif.ImageIFD.Model, b"").decode(errors="ignore"),
-            "datetime": exif["0th"].get(piexif.ImageIFD.DateTime, b"").decode(errors="ignore"),
-            "software": exif["0th"].get(piexif.ImageIFD.Software, b"").decode(errors="ignore"),
-            "gps_present": lat is not None and lon is not None,
-            "latitude": lat,
-            "longitude": lon
-        }
     except Exception:
-        return {}
+        pass
+
+    return exif_data
 
 
-def tamper_analysis(path):
-    img = Image.open(path).convert("L")
-    pixels = list(img.getdata())
+# ---------------------------
+# AUTHENTICITY SCORE (POINT 1 CORE FIX)
+# ---------------------------
+def compute_authenticity_score(ela, exif, secure_capture):
+    score = 100
 
-    mean = sum(pixels) / len(pixels)
-    variance = sum((p - mean) ** 2 for p in pixels) / len(pixels)
+    # Penalize ELA
+    if ela > 3000:
+        score -= 40
+    elif ela > 1500:
+        score -= 25
+    elif ela > 800:
+        score -= 10
 
-    probability = max(5, min(95, int(100 - (variance / 500))))
-    return round(variance, 2), probability
+    # Penalize missing metadata
+    if not exif.get("datetime"):
+        score -= 15
+    if not exif.get("gps"):
+        score -= 10
+    if exif.get("software") not in (None, "", "Unknown"):
+        score -= 20
+
+    # Penalize non-secure capture
+    if not secure_capture:
+        score -= 10
+
+    return max(0, min(100, score))
 
 
-def analyze_image(path, original_filename, secure_capture_flag, claimed_location):
-    img = Image.open(path)
-    width, height = img.size
+# ---------------------------
+# MAIN ANALYSIS FUNCTION
+# ---------------------------
+def analyze_image(image_path):
+    ela = calculate_ela(image_path)
+    exif = extract_exif(image_path)
 
-    exif = extract_exif(path)
-    ela, tamper_prob = tamper_analysis(path)
-    sha = sha256_file(path)
+    # Currently you do not have secure capture implemented
+    secure_capture_flag = False
 
-    metadata_score = 100 if exif else 30
-    if exif.get("software"):
-        metadata_score -= 30
-
-    ai_score = max(0, 100 - tamper_prob)
-
-    overall = int(
-        metadata_score * 0.35 +
-        (100 - tamper_prob) * 0.4 +
-        (100 - ai_score) * 0.25
+    authenticity_score = compute_authenticity_score(
+        ela=ela,
+        exif=exif,
+        secure_capture=secure_capture_flag
     )
 
-    label = (
-        "Highly Authentic" if overall >= 80 else
-        "Partially Authentic" if overall >= 60 else
-        "Suspicious" if overall >= 40 else
-        "High Fraud Risk"
-    )
-
-    return {
-        "generated_at": datetime.utcnow().strftime("%d %b %Y"),
-        "scores": {
-            "overall": overall,
-            "label": label,
-            "metadata": metadata_score,
-            "tampering": tamper_prob,
-            "ai": ai_score
-        },
+    analysis = {
         "image": {
-            "type": img.format,
-            "resolution": f"{width} × {height}",
-            "size_mb": round(os.path.getsize(path) / (1024 * 1024), 2),
-            "sha256": sha,
-            "color": "sRGB"
+            "type": os.path.splitext(image_path)[1].upper().replace(".", ""),
+            "size": os.path.getsize(image_path),
         },
         "exif": exif,
         "tampering": {
-            "ela": ela,
-            "probability": tamper_prob
+            "ela": round(ela, 2),
+            "probability": 100 - authenticity_score
         },
         "ai": {
             "enabled": True,
-            "score": ai_score
+            "score": max(0, 100 - authenticity_score) // 10
         },
-        "chain": {
-            "secure_capture": secure_capture_flag,
-            "encryption": "AES-256" if secure_capture_flag else "Not verified",
-            "tls": "TLS 1.3"
-        },
-        "claimed_location": claimed_location
+        "authenticity_score": authenticity_score,
+        "secure_capture": secure_capture_flag
     }
+
+    return analysis
