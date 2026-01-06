@@ -13,8 +13,12 @@ def calculate_ela(image_path):
     original.save(temp_path, "JPEG", quality=90)
     compressed = Image.open(temp_path)
 
-    ela = np.mean(np.abs(np.asarray(original, dtype=np.int16)
-                         - np.asarray(compressed, dtype=np.int16)))
+    ela = np.mean(
+        np.abs(
+            np.asarray(original, dtype=np.int16)
+            - np.asarray(compressed, dtype=np.int16)
+        )
+    )
 
     os.remove(temp_path)
     return float(ela)
@@ -24,78 +28,87 @@ def calculate_ela(image_path):
 # METADATA EXTRACTION
 # ---------------------------
 def extract_exif(image_path):
-    exif_data = {
+    exif = {
         "datetime": None,
         "gps": None,
-        "software": None
+        "software": None,
     }
 
     try:
         img = Image.open(image_path)
-        exif_raw = img._getexif()
-        if not exif_raw:
-            return exif_data
+        raw = img._getexif()
+        if not raw:
+            return exif
 
-        for tag, value in exif_raw.items():
-            tag_name = ExifTags.TAGS.get(tag, tag)
-
-            if tag_name == "DateTimeOriginal":
-                exif_data["datetime"] = value
-            elif tag_name == "Software":
-                exif_data["software"] = value
-            elif tag_name == "GPSInfo":
-                exif_data["gps"] = value
+        for tag, value in raw.items():
+            name = ExifTags.TAGS.get(tag, tag)
+            if name == "DateTimeOriginal":
+                exif["datetime"] = value
+            elif name == "GPSInfo":
+                exif["gps"] = value
+            elif name == "Software":
+                exif["software"] = value
 
     except Exception:
         pass
 
-    return exif_data
+    return exif
 
 
 # ---------------------------
-# AUTHENTICITY SCORE (POINT 1 CORE FIX)
+# AUTHENTICITY SCORE (FIXED)
 # ---------------------------
 def compute_authenticity_score(ela, exif, secure_capture):
     score = 100
+    explanations = []
 
-    # Penalize ELA
+    # 1. ELA impact (primary)
     if ela > 3000:
         score -= 40
+        explanations.append("Very high ELA inconsistency detected")
     elif ela > 1500:
         score -= 25
+        explanations.append("Moderate ELA inconsistency detected")
     elif ela > 800:
         score -= 10
+        explanations.append("Minor ELA artifacts detected")
+    else:
+        explanations.append("Low ELA variation (consistent image)")
 
-    # Penalize missing metadata
-    if not exif.get("datetime"):
-        score -= 15
-    if not exif.get("gps"):
-        score -= 10
-    if exif.get("software") not in (None, "", "Unknown"):
-        score -= 20
+    # 2. Metadata interpretation (FIXED LOGIC)
+    if not exif["datetime"] and not exif["gps"] and not exif["software"]:
+        explanations.append(
+            "Metadata missing — common for shared/exported images"
+        )
+        # NO PENALTY
+    else:
+        if exif["software"]:
+            score -= 15
+            explanations.append("Editing software tag detected")
 
-    # Penalize non-secure capture
+    # 3. Secure capture (informational only)
     if not secure_capture:
-        score -= 10
+        explanations.append("Image not captured via secure app")
 
-    return max(0, min(100, score))
+    return max(0, min(100, score)), explanations
 
 
 # ---------------------------
-# MAIN ANALYSIS FUNCTION
+# MAIN ANALYSIS
 # ---------------------------
 def analyze_image(image_path):
     ela = calculate_ela(image_path)
     exif = extract_exif(image_path)
 
-    # Currently you do not have secure capture implemented
     secure_capture_flag = False
 
-    authenticity_score = compute_authenticity_score(
+    authenticity_score, explanations = compute_authenticity_score(
         ela=ela,
         exif=exif,
-        secure_capture=secure_capture_flag
+        secure_capture=secure_capture_flag,
     )
+
+    tamper_probability = max(0, min(100, int((ela / 3000) * 100)))
 
     analysis = {
         "image": {
@@ -103,16 +116,17 @@ def analyze_image(image_path):
             "size": os.path.getsize(image_path),
         },
         "exif": exif,
+        "authenticity_score": authenticity_score,
+        "explanations": explanations,
         "tampering": {
             "ela": round(ela, 2),
-            "probability": 100 - authenticity_score
+            "probability": tamper_probability,
         },
         "ai": {
             "enabled": True,
-            "score": max(0, 100 - authenticity_score) // 10
+            "score": 1 if authenticity_score > 80 else 3,
         },
-        "authenticity_score": authenticity_score,
-        "secure_capture": secure_capture_flag
+        "secure_capture": secure_capture_flag,
     }
 
     return analysis
