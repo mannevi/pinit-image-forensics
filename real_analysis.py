@@ -25,14 +25,19 @@ def calculate_ela(image_path):
 
 
 # ---------------------------
+# NOISE / SMOOTHNESS CHECK
+# ---------------------------
+def compute_noise_variance(image_path):
+    img = Image.open(image_path).convert("L")
+    arr = np.asarray(img, dtype=np.float32)
+    return float(np.var(arr))
+
+
+# ---------------------------
 # METADATA EXTRACTION
 # ---------------------------
 def extract_exif(image_path):
-    exif = {
-        "datetime": None,
-        "gps": None,
-        "software": None,
-    }
+    exif = {"datetime": None, "gps": None, "software": None}
 
     try:
         img = Image.open(image_path)
@@ -48,7 +53,6 @@ def extract_exif(image_path):
                 exif["gps"] = value
             elif name == "Software":
                 exif["software"] = value
-
     except Exception:
         pass
 
@@ -56,67 +60,60 @@ def extract_exif(image_path):
 
 
 # ---------------------------
-# AUTHENTICITY SCORE (FIXED)
-# ---------------------------
-def compute_authenticity_score(ela, exif, secure_capture):
-    score = 100
-    explanations = []
-
-    # 1. ELA impact (primary)
-    if ela > 3000:
-        score -= 40
-        explanations.append("Very high ELA inconsistency detected")
-    elif ela > 1500:
-        score -= 25
-        explanations.append("Moderate ELA inconsistency detected")
-    elif ela > 800:
-        score -= 10
-        explanations.append("Minor ELA artifacts detected")
-    else:
-        explanations.append("Low ELA variation (consistent image)")
-
-    # 2. Metadata interpretation (FIXED LOGIC)
-    if not exif["datetime"] and not exif["gps"] and not exif["software"]:
-        explanations.append(
-            "Metadata missing — common for shared/exported images"
-        )
-        # NO PENALTY
-    else:
-        if exif["software"]:
-            score -= 15
-            explanations.append("Editing software tag detected")
-
-    # 3. Secure capture (informational only)
-    if not secure_capture:
-        explanations.append("Image not captured via secure app")
-
-    return max(0, min(100, score)), explanations
-
-
-# ---------------------------
-# MAIN ANALYSIS
+# CORE SCORING LOGIC
 # ---------------------------
 def analyze_image(image_path):
     ela = calculate_ela(image_path)
+    noise_var = compute_noise_variance(image_path)
     exif = extract_exif(image_path)
 
-    secure_capture_flag = False
+    explanations = []
+    score = 100
+    ai_risk = 1
 
-    authenticity_score, explanations = compute_authenticity_score(
-        ela=ela,
-        exif=exif,
-        secure_capture=secure_capture_flag,
-    )
+    # ---------- ELA ----------
+    if ela > 2500:
+        score -= 35
+        explanations.append("High ELA inconsistency detected")
+    elif ela > 1200:
+        score -= 20
+        explanations.append("Moderate ELA inconsistency detected")
+    elif ela < 5:
+        explanations.append("Very low ELA variation")
 
-    tamper_probability = max(0, min(100, int((ela / 3000) * 100)))
+    # ---------- METADATA ----------
+    metadata_missing = not exif["datetime"] and not exif["gps"] and not exif["software"]
 
-    analysis = {
-        "image": {
-            "type": os.path.splitext(image_path)[1].upper().replace(".", ""),
-            "size": os.path.getsize(image_path),
-        },
-        "exif": exif,
-        "authenticity_score": authenticity_score,
+    if metadata_missing:
+        explanations.append("Metadata missing (common for shared or encrypted images)")
+        score -= 10
+
+    if exif["software"]:
+        score -= 15
+        explanations.append("Editing software tag detected")
+
+    # ---------- ENCRYPTION / RECOMPRESSION ----------
+    if metadata_missing and ela < 10 and noise_var < 300:
+        score -= 10
+        explanations.append("Possible recompression or encryption artifacts")
+
+    # ---------- AI HEURISTIC DETECTION ----------
+    if ela < 5 and noise_var < 200 and metadata_missing:
+        ai_risk = 8
+        score -= 40
+        explanations.append("AI-generated image likely (over-smooth texture, no metadata)")
+    elif ela < 10 and noise_var < 300:
+        ai_risk = 5
+        score -= 20
+        explanations.append("AI-assisted or synthetic enhancement suspected")
+
+    # ---------- FINAL CLAMP ----------
+    score = max(0, min(100, score))
+
+    tamper_probability = min(100, int((ela / 2500) * 100))
+
+    return {
+        "authenticity_score": score,
         "explanations": explanations,
         "tampering": {
             "ela": round(ela, 2),
@@ -124,9 +121,11 @@ def analyze_image(image_path):
         },
         "ai": {
             "enabled": True,
-            "score": 1 if authenticity_score > 80 else 3,
+            "score": ai_risk,
         },
-        "secure_capture": secure_capture_flag,
+        "image": {
+            "type": os.path.splitext(image_path)[1].upper().replace(".", ""),
+            "size": os.path.getsize(image_path),
+        },
+        "exif": exif,
     }
-
-    return analysis
