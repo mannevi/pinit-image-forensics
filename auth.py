@@ -2,23 +2,18 @@ import sqlite3
 import hashlib
 import os
 
-# -------------------------------------------------
-# STREAMLIT CLOUD SAFE SQLITE LOCATION
-# -------------------------------------------------
-DB_PATH = "/tmp/pinit_users.db"
+DATA_DIR = os.path.join(os.getcwd(), "data")
+os.makedirs(DATA_DIR, exist_ok=True)
+DB_PATH = os.path.join(DATA_DIR, "users.db")
 
 
 def get_connection():
     return sqlite3.connect(DB_PATH, check_same_thread=False)
 
 
-# -------------------------------------------------
-# INIT DB (SAFE TO CALL MULTIPLE TIMES)
-# -------------------------------------------------
 def init_db():
     conn = get_connection()
     c = conn.cursor()
-
     c.execute("""
         CREATE TABLE IF NOT EXISTS users (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -26,21 +21,18 @@ def init_db():
             password TEXT NOT NULL
         )
     """)
-
     conn.commit()
     conn.close()
 
 
-def hash_password(password):
-    return hashlib.sha256(password.encode()).hexdigest()
+def hash_password(password: str) -> str:
+    return hashlib.sha256(password.encode("utf-8")).hexdigest()
 
 
-def register_user(username, password):
-    init_db()  # 🔥 FORCE TABLE EXISTENCE EVERY TIME
-
+def register_user(username: str, password: str) -> bool:
+    init_db()
     conn = get_connection()
     c = conn.cursor()
-
     try:
         c.execute(
             "INSERT INTO users (username, password) VALUES (?, ?)",
@@ -48,26 +40,20 @@ def register_user(username, password):
         )
         conn.commit()
         return True
-
     except sqlite3.IntegrityError:
         return False
-
     finally:
         conn.close()
 
 
-def verify_login(username, password):
-    init_db()  # 🔥 ENSURE TABLE EXISTS
-
+def verify_login(username: str, password: str) -> bool:
+    init_db()
     conn = get_connection()
     c = conn.cursor()
-
     c.execute(
         "SELECT id FROM users WHERE username=? AND password=?",
         (username, hash_password(password))
     )
-
-    result = c.fetchone()
+    row = c.fetchone()
     conn.close()
-
-    return result is not None
+    return row is not None
