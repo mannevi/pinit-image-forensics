@@ -6,9 +6,9 @@ from datetime import datetime
 import piexif
 
 
-# -------------------------
-# EXIF extraction (with GPS)
-# -------------------------
+# ======================================================
+# EXIF EXTRACTION (with GPS decoding)
+# ======================================================
 def extract_exif(path):
     try:
         ex = piexif.load(path)
@@ -54,10 +54,10 @@ def extract_exif(path):
         }
 
 
-# -------------------------
-# Scoring functions
-# -------------------------
-def metadata_score(exif):
+# ======================================================
+# METADATA SCORE
+# ======================================================
+def metadata_score(exif, secure_capture):
     score = 100
     if not exif["make"]:
         score -= 10
@@ -69,25 +69,82 @@ def metadata_score(exif):
         score -= 20
     if exif["software"]:
         score -= 30
+
+    # 🔴 Download / forwarded image penalty
+    if not secure_capture:
+        score -= 30
+
     return max(0, score)
 
 
+# ======================================================
+# GLOBAL TAMPERING (EXPOSURE / CONTRAST)
+# ======================================================
+def global_tampering_score(image_path):
+    img = Image.open(image_path).convert("L")
+    arr = np.asarray(img) / 255.0
+
+    score = 0
+    indicators = []
+
+    if np.mean(arr > 0.98) > 0.015:
+        score += 25
+        indicators.append("Highlight clipping detected")
+
+    if np.mean(arr < 0.02) > 0.01:
+        score += 15
+        indicators.append("Shadow detail loss detected")
+
+    if np.std(arr) < 0.18:
+        score += 20
+        indicators.append("Abnormally low contrast")
+
+    hist, _ = np.histogram(arr, bins=256, range=(0, 1), density=True)
+    entropy = -np.sum((hist + 1e-9) * np.log2(hist + 1e-9))
+    if entropy < 6.5:
+        score += 20
+        indicators.append("Histogram entropy unusually low")
+
+    return min(100, score), indicators
+
+
+# ======================================================
+# TAMPERING SCORE (LOCAL + GLOBAL)
+# ======================================================
 def tampering_score(image_path):
     img = Image.open(image_path).convert("RGB")
+
+    # ----- Local tampering (ELA) -----
     tmp = "tmp_ela.jpg"
     img.save(tmp, "JPEG", quality=90)
-
     diff = ImageChops.difference(img, Image.open(tmp))
-    arr = np.asarray(diff.convert("L"))
+    ela = np.asarray(diff.convert("L"))
     os.remove(tmp)
 
-    high_ratio = np.mean(arr > 40) * 100
-    avg = np.mean(arr)
+    ela_score = min(100, (np.mean(ela > 40) * 100) * 0.8 + np.mean(ela) * 0.2)
 
-    probability = min(100, int(high_ratio * 0.8 + avg * 0.2))
-    return probability, round(avg, 2), round(high_ratio, 2)
+    # ----- Global tampering -----
+    global_score, indicators = global_tampering_score(image_path)
+
+    # ----- Recompression penalty -----
+    recompression_penalty = 10
+
+    # ----- Final weighted score -----
+    final_score = (
+        0.5 * ela_score +
+        0.3 * global_score +
+        0.2 * recompression_penalty
+    )
+
+    # ❗ Never allow 0%
+    final_score = max(final_score, 10)
+
+    return int(final_score), indicators
 
 
+# ======================================================
+# DEEPFAKE / AI HEURISTIC
+# ======================================================
 def deepfake_score(img, exif):
     risk = 0
     if not exif["model"]:
@@ -108,7 +165,10 @@ def deepfake_score(img, exif):
     return min(100, risk)
 
 
-def geo_score(exif, claimed):
+# ======================================================
+# GEO SCORE
+# ======================================================
+def geo_score(exif, claimed, secure_capture):
     score = 100
     if not exif["gps_present"]:
         score -= 40
@@ -116,22 +176,27 @@ def geo_score(exif, claimed):
         score -= 30
     if claimed and not exif["gps_present"]:
         score -= 10
+
+    # 🔴 Non-secure upload cap
+    if not secure_capture:
+        score = min(score, 40)
+
     return max(0, score)
 
 
-# -------------------------
+# ======================================================
 # MAIN ENTRY POINT
-# -------------------------
+# ======================================================
 def analyze_image(image_path, original_filename, secure_capture_flag, claimed_location):
     img = Image.open(image_path)
     exif = extract_exif(image_path)
 
-    meta = metadata_score(exif)
-    tamp, ela_avg, ela_ratio = tampering_score(image_path)
+    meta = metadata_score(exif, secure_capture_flag)
+    tamp, tamper_indicators = tampering_score(image_path)
     deep = deepfake_score(img, exif)
-    geo = geo_score(exif, claimed_location)
+    geo = geo_score(exif, claimed_location, secure_capture_flag)
 
-    dup = 10  # placeholder for now
+    dup = 10  # placeholder
 
     risk = int(
         (100 - meta) * 0.22 +
@@ -142,6 +207,10 @@ def analyze_image(image_path, original_filename, secure_capture_flag, claimed_lo
     )
 
     auth = max(0, 100 - risk)
+
+    # ❗ Edited images cannot be Highly Authentic
+    if tamp >= 25:
+        auth = min(auth, 65)
 
     if auth >= 80:
         verdict = "Highly Authentic"
@@ -167,7 +236,7 @@ def analyze_image(image_path, original_filename, secure_capture_flag, claimed_lo
             "file_size_mb": round(os.path.getsize(image_path)/(1024*1024), 2),
             "resolution": f"{img.width} × {img.height}",
             "color_space": img.mode,
-            "compression_artifacts": "Low",
+            "compression_artifacts": "Present",
             "capture_method": "PinIT Secure Capture" if secure_capture_flag else "Standard Upload",
             "capture_integrity_status": "Verified" if secure_capture_flag else "Not Verified",
             "user_uuid_embedded": "Not Found"
@@ -186,17 +255,14 @@ def analyze_image(image_path, original_filename, secure_capture_flag, claimed_lo
 
         "tampering": {
             "tampering_probability_pct": tamp,
-            "ela_avg": ela_avg,
-            "ela_high_ratio_pct": ela_ratio,
+            "detected_indicators": tamper_indicators,
             "heatmap_path": None
         },
 
         "deepfake": {
             "risk_score": deep,
-            "ai_generated_content": "Not fully synthetic",
-            "ai_assisted_editing": "Unlikely",
-            "interpretation": "Low indicators of synthetic generation",
-            "signals": []
+            "ai_generated_content": "Unlikely" if deep < 50 else "Likely",
+            "interpretation": "Heuristic-based AI detection"
         },
 
         "duplicate_reuse": {
@@ -208,11 +274,11 @@ def analyze_image(image_path, original_filename, secure_capture_flag, claimed_lo
             "gps_present": exif["gps_present"],
             "gps_coordinates": (
                 f"{exif['latitude']}, {exif['longitude']}"
-                if exif["gps_present"] else "Not Available (GPS stripped or missing)"
+                if exif["gps_present"] else
+                "Not Available (Stripped or Missing)"
             ),
             "confidence_score": geo,
-            "confidence_level": "High" if geo >= 70 else "Low",
-            "notes": []
+            "confidence_level": "High" if geo >= 70 else "Low"
         },
 
         "risk_classification": {
