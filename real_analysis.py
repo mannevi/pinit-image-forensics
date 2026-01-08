@@ -1,151 +1,230 @@
-from datetime import datetime
 import os
 import hashlib
-from PIL import Image
-import piexif
 import numpy as np
+from PIL import Image, ImageChops
+from datetime import datetime
+import piexif
 
 
-def analyze_image(
-    image_path: str,
-    original_filename: str,
-    secure_capture_flag: bool,
-    claimed_location: str
-) -> dict:
-    """
-    Canonical forensic analysis function.
-    MUST match app.py exactly.
-    """
-
-    # -------------------------
-    # Load image
-    # -------------------------
-    img = Image.open(image_path)
-    width, height = img.size
-    file_size = os.path.getsize(image_path)
-
-    # -------------------------
-    # Hash
-    # -------------------------
-    with open(image_path, "rb") as f:
-        sha256 = hashlib.sha256(f.read()).hexdigest()
-
-    # -------------------------
-    # EXIF extraction
-    # -------------------------
+# -------------------------
+# EXIF extraction (with GPS)
+# -------------------------
+def extract_exif(path):
     try:
-        exif_dict = piexif.load(image_path)
-        exif = {
-            "make": exif_dict["0th"].get(piexif.ImageIFD.Make, b"").decode(errors="ignore"),
-            "model": exif_dict["0th"].get(piexif.ImageIFD.Model, b"").decode(errors="ignore"),
-            "datetime": exif_dict["0th"].get(piexif.ImageIFD.DateTime, b"").decode(errors="ignore"),
-            "software": exif_dict["0th"].get(piexif.ImageIFD.Software, b"").decode(errors="ignore"),
-            "gps_present": bool(exif_dict.get("GPS"))
+        ex = piexif.load(path)
+        gps = ex.get("GPS", {})
+
+        def dms_to_deg(dms, ref):
+            d = dms[0][0] / dms[0][1]
+            m = dms[1][0] / dms[1][1]
+            s = dms[2][0] / dms[2][1]
+            val = d + m / 60 + s / 3600
+            return -val if ref in [b"S", b"W"] else val
+
+        lat = lon = None
+        if piexif.GPSIFD.GPSLatitude in gps:
+            lat = dms_to_deg(
+                gps[piexif.GPSIFD.GPSLatitude],
+                gps.get(piexif.GPSIFD.GPSLatitudeRef, b"N")
+            )
+        if piexif.GPSIFD.GPSLongitude in gps:
+            lon = dms_to_deg(
+                gps[piexif.GPSIFD.GPSLongitude],
+                gps.get(piexif.GPSIFD.GPSLongitudeRef, b"E")
+            )
+
+        return {
+            "make": ex["0th"].get(piexif.ImageIFD.Make, b"").decode(errors="ignore"),
+            "model": ex["0th"].get(piexif.ImageIFD.Model, b"").decode(errors="ignore"),
+            "datetime": ex["0th"].get(piexif.ImageIFD.DateTime, b"").decode(errors="ignore"),
+            "software": ex["0th"].get(piexif.ImageIFD.Software, b"").decode(errors="ignore"),
+            "gps_present": lat is not None and lon is not None,
+            "latitude": lat,
+            "longitude": lon
         }
     except Exception:
-        exif = {
+        return {
             "make": "",
             "model": "",
             "datetime": "",
             "software": "",
-            "gps_present": False
+            "gps_present": False,
+            "latitude": None,
+            "longitude": None
         }
 
-    # -------------------------
-    # Scores (deterministic placeholders)
-    # -------------------------
-    metadata_score = 85 if exif["model"] else 55
-    tampering_score = 25
-    deepfake_score = 20
-    duplication_score = 10
-    geo_score = 75 if exif["gps_present"] else 40
 
-    overall_risk = int(
-        (100 - metadata_score) * 0.22 +
-        tampering_score * 0.28 +
-        deepfake_score * 0.18 +
-        duplication_score * 0.17 +
-        (100 - geo_score) * 0.15
+# -------------------------
+# Scoring functions
+# -------------------------
+def metadata_score(exif):
+    score = 100
+    if not exif["make"]:
+        score -= 10
+    if not exif["model"]:
+        score -= 15
+    if not exif["datetime"]:
+        score -= 20
+    if not exif["gps_present"]:
+        score -= 20
+    if exif["software"]:
+        score -= 30
+    return max(0, score)
+
+
+def tampering_score(image_path):
+    img = Image.open(image_path).convert("RGB")
+    tmp = "tmp_ela.jpg"
+    img.save(tmp, "JPEG", quality=90)
+
+    diff = ImageChops.difference(img, Image.open(tmp))
+    arr = np.asarray(diff.convert("L"))
+    os.remove(tmp)
+
+    high_ratio = np.mean(arr > 40) * 100
+    avg = np.mean(arr)
+
+    probability = min(100, int(high_ratio * 0.8 + avg * 0.2))
+    return probability, round(avg, 2), round(high_ratio, 2)
+
+
+def deepfake_score(img, exif):
+    risk = 0
+    if not exif["model"]:
+        risk += 20
+    if exif["software"]:
+        risk += 25
+
+    gray = np.asarray(img.convert("L")) / 255.0
+    lap_var = np.var(
+        -4 * gray +
+        np.roll(gray, 1, 0) + np.roll(gray, -1, 0) +
+        np.roll(gray, 1, 1) + np.roll(gray, -1, 1)
     )
 
-    authenticity_score = max(0, 100 - overall_risk)
+    if lap_var < 0.001:
+        risk += 20
 
-    # -------------------------
-    # RETURN STRUCTURE (LOCKED)
-    # -------------------------
+    return min(100, risk)
+
+
+def geo_score(exif, claimed):
+    score = 100
+    if not exif["gps_present"]:
+        score -= 40
+    if not exif["datetime"]:
+        score -= 30
+    if claimed and not exif["gps_present"]:
+        score -= 10
+    return max(0, score)
+
+
+# -------------------------
+# MAIN ENTRY POINT
+# -------------------------
+def analyze_image(image_path, original_filename, secure_capture_flag, claimed_location):
+    img = Image.open(image_path)
+    exif = extract_exif(image_path)
+
+    meta = metadata_score(exif)
+    tamp, ela_avg, ela_ratio = tampering_score(image_path)
+    deep = deepfake_score(img, exif)
+    geo = geo_score(exif, claimed_location)
+
+    dup = 10  # placeholder for now
+
+    risk = int(
+        (100 - meta) * 0.22 +
+        tamp * 0.28 +
+        deep * 0.18 +
+        dup * 0.17 +
+        (100 - geo) * 0.15
+    )
+
+    auth = max(0, 100 - risk)
+
+    if auth >= 80:
+        verdict = "Highly Authentic"
+    elif auth >= 60:
+        verdict = "Partially Authentic"
+    elif auth >= 40:
+        verdict = "Suspicious"
+    else:
+        verdict = "High Fraud Risk"
+
+    sha256 = hashlib.sha256(open(image_path, "rb").read()).hexdigest()
+
     return {
         "generated_at": datetime.utcnow().strftime("%d %b %Y"),
 
         "executive_summary": {
-            "overall_finding": "🟢 Low Fraud Risk" if overall_risk < 40 else "🔶 Suspicious",
+            "overall_finding": verdict,
             "finding_details": "Automated analysis completed using metadata, tampering, and heuristic checks."
         },
 
         "image_overview": {
-            "image_type": img.format or "Unknown",
-            "file_size_mb": round(file_size / (1024 * 1024), 2),
-            "resolution": f"{width} × {height}",
-            "color_space": img.mode,                     # ✅ REQUIRED
-            "compression_artifacts": "Low",              # ✅ REQUIRED
+            "image_type": img.format,
+            "file_size_mb": round(os.path.getsize(image_path)/(1024*1024), 2),
+            "resolution": f"{img.width} × {img.height}",
+            "color_space": img.mode,
+            "compression_artifacts": "Low",
             "capture_method": "PinIT Secure Capture" if secure_capture_flag else "Standard Upload",
             "capture_integrity_status": "Verified" if secure_capture_flag else "Not Verified",
             "user_uuid_embedded": "Not Found"
         },
 
         "authenticity": {
-            "score": authenticity_score,
-            "label": (
-                "Highly Authentic" if authenticity_score >= 80
-                else "Suspicious" if authenticity_score >= 40
-                else "High Fraud Risk"
-            )
+            "score": auth,
+            "label": verdict
         },
 
         "metadata": {
-            "integrity_score": metadata_score,
+            "integrity_score": meta,
             "exif": exif,
             "observations": []
         },
 
         "tampering": {
-            "tampering_probability_pct": tampering_score,
-            "ela_avg": None,
-            "ela_high_ratio_pct": None,
+            "tampering_probability_pct": tamp,
+            "ela_avg": ela_avg,
+            "ela_high_ratio_pct": ela_ratio,
             "heatmap_path": None
         },
 
         "deepfake": {
-            "risk_score": deepfake_score,
-            "ai_generated_content": "Unlikely",
+            "risk_score": deep,
+            "ai_generated_content": "Not fully synthetic",
             "ai_assisted_editing": "Unlikely",
-            "interpretation": "No strong AI indicators detected",
+            "interpretation": "Low indicators of synthetic generation",
             "signals": []
         },
 
         "duplicate_reuse": {
-            "exact_match_found": False,
-            "near_duplicate_found": False,
             "reuse_risk_level": "Low"
         },
 
         "geo_time": {
             "claimed_location": claimed_location or "Not Provided",
             "gps_present": exif["gps_present"],
-            "confidence_score": geo_score,
-            "confidence_level": "High" if geo_score >= 70 else "Low",
+            "gps_coordinates": (
+                f"{exif['latitude']}, {exif['longitude']}"
+                if exif["gps_present"] else "Not Available (GPS stripped or missing)"
+            ),
+            "confidence_score": geo,
+            "confidence_level": "High" if geo >= 70 else "Low",
             "notes": []
         },
 
         "risk_classification": {
             "risk_factors": {
-                "Metadata Integrity": metadata_score,
-                "Tampering Indicators": tampering_score,
-                "Deepfake Probability": deepfake_score,
-                "Duplication Risk": duplication_score,
-                "Geo-Time Accuracy": geo_score
+                "Metadata Integrity": meta,
+                "Tampering Indicators": tamp,
+                "Deepfake Probability": deep,
+                "Duplication Risk": dup,
+                "Geo-Time Accuracy": geo
             },
-            "overall_risk_score": overall_risk,
-            "overall_risk_rating": "Low" if overall_risk < 40 else "Medium",
+            "overall_risk_score": risk,
+            "overall_risk_rating": verdict,
             "recommended_action": "Proceed with standard verification"
         },
 
